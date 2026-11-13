@@ -21,7 +21,7 @@ Quy tắc (đã cập nhật theo kế hoạch nhóm + báo cáo EDA):
   TV3 sẽ tạo lag/rolling — lúc đó chúng mới là feature hợp lệ.
 
 Cách dùng cho TV4/TV5 (fit lại trong từng fold CV):
-    from preprocess import get_feature_types, build_preprocessor
+    from tv2_preprocess import get_feature_types, build_preprocessor
     num_cols, cat_cols = get_feature_types(train)
     pre = build_preprocessor(num_cols, cat_cols)   # CHƯA fit
     model = Pipeline([("pre", pre), ("model", ...)])
