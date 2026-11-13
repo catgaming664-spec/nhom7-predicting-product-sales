@@ -6,6 +6,8 @@ Quy tắc (đã cập nhật theo kế hoạch nhóm + báo cáo EDA):
 - Tên cột được chuẩn hóa về chữ thường, snake_case.
 - Loại giao dịch không hợp lệ: quantity > 0 VÀ price > 0
   (khớp định nghĩa trong Nhóm 7.docx mục 1).
+- Loại đơn lớn đã bị hủy toàn bộ (doanh thu giả) và các mã không phải sản phẩm
+  (POST, DOT, M, ...). Hai bước này làm số quan sát khác báo cáo TV1 nên cần báo nhóm.
 - Tổng hợp về mức (stockcode × tuần):
     sales     = sum(quantity * price)
     total_qty = sum(quantity)
@@ -82,15 +84,26 @@ VALIDATION_RATIO = 0.20
 # Lọc giao dịch không hợp lệ (quantity > 0 và price > 0) — đúng định nghĩa báo cáo.
 FILTER_INVALID_TRANSACTIONS = True
 
-# Tùy chọn: lọc thêm stockcode không phải sản phẩm (POST, DOT, M, BANK CHARGES...).
-# Mặc định TẮT để giữ khớp 3.922 sản phẩm / 101.579 quan sát của báo cáo TV1.
-# (Số dòng giao dịch sau lọc là 524.879 vì đã xóa trùng; TV1 ghi 530.105 trước khi xóa trùng.)
-# Bật True nếu nhóm muốn dự báo thuần sản phẩm (loại phí ship/điều chỉnh).
-FILTER_NON_PRODUCT_STOCKCODES = False
-PRODUCT_STOCKCODE_REGEX = r"^\d{5}"
+# Loại đơn lớn đã bị hủy toàn bộ: dòng hủy (quantity < 0) có doanh thu <= -MIN_SALES và
+# một đơn gốc cùng stockcode, price, quantity đối nhau xảy ra trước đó. Dòng hủy bị bỏ ở
+# bước lọc quantity > 0; nếu giữ đơn gốc thì nó thành "doanh thu giả" chi phối RMSE.
+# Hàm in danh sách hóa đơn bị loại để ghi vào báo cáo. Chạy TRƯỚC khi lọc quantity > 0.
+DROP_CANCELLED_LARGE_ORDERS = True
+CANCELLED_ORDER_MIN_SALES = 50_000
 
-# Chỉ điền các cột số thực sự cần xử lý outlier sau khi xem EDA.
-# Không đưa TARGET hoặc cột ID vào đây.
+# Loại các mã không phải sản phẩm (phí gửi hàng, phí ngân hàng, nhập tay...).
+# Danh sách lấy từ thống kê dòng bất thường trên dữ liệu thật (so khớp không phân biệt hoa thường).
+# Các mã khác không bắt đầu bằng 5 chữ số nhưng KHÔNG nằm trong danh sách này vẫn được giữ và
+# được in ra để nhóm xem xét; nếu là phí/điều chỉnh thì thêm vào NON_PRODUCT_STOCKCODES.
+# Bật bước này sẽ làm số quan sát/sản phẩm khác báo cáo TV1 (101.579 / 3.922).
+FILTER_NON_PRODUCT_STOCKCODES = True
+NON_PRODUCT_STOCKCODES = {
+    "POST", "DOT", "M", "C2", "D", "S", "BANK CHARGES", "AMAZONFEE",
+}
+
+# Không clip IQR trên sales (phân phối lệch, bán buôn là doanh thu thật): ngoại lệ do đơn đã
+# hủy được xử lý bằng DROP_CANCELLED_LARGE_ORDERS; khi huấn luyện nên dùng log1p(sales).
+# Chỉ điền vào đây các cột số khác thực sự cần clip; không đưa TARGET hoặc cột ID vào.
 OUTLIER_COLS = []
 IQR_K = 1.5
 
@@ -279,19 +292,56 @@ def filter_invalid_transactions(df, qty_col=QTY_COL, price_col=PRICE_COL):
     return df
 
 
-def filter_non_product_stockcodes(df, regex=PRODUCT_STOCKCODE_REGEX):
+def drop_cancelled_large_orders(df, min_sales=CANCELLED_ORDER_MIN_SALES):
     """
-    Lọc các dòng có stockcode không phải mã sản phẩm (POST, DOT, M, ...).
-    Mặc định pipeline không gọi hàm này (FILTER_NON_PRODUCT_STOCKCODES=False).
+    Loại đơn gốc doanh thu lớn đã bị hủy toàn bộ (xem DROP_CANCELLED_LARGE_ORDERS).
+    Cần chạy khi các dòng quantity < 0 vẫn còn trong df.
     """
     before = len(df)
-    codes = df["stockcode"].astype(str).str.strip()
-    mask = codes.str.match(regex)
-    df = df.loc[mask].reset_index(drop=True)
+    big_cancels = df[(df[QTY_COL] < 0) & (df[TARGET] <= -min_sales)]
+    drop_idx, pairs = [], []
+    for _, c in big_cancels.iterrows():
+        match = df[
+            (df["stockcode"] == c["stockcode"])
+            & (df[QTY_COL] == -c[QTY_COL])
+            & (df[PRICE_COL] == c[PRICE_COL])
+            & (df[DATE_COL] <= c[DATE_COL])
+            & ~df.index.isin(drop_idx)
+        ]
+        if len(match):
+            j = match[DATE_COL].idxmax()
+            drop_idx.append(j)
+            pairs.append((df.at[j, "invoice"], df.at[j, "stockcode"], int(df.at[j, QTY_COL]),
+                          df.at[j, PRICE_COL], df.at[j, TARGET], c["invoice"]))
+    df = df.drop(index=drop_idx).reset_index(drop=True)
     print(
-        f"Lọc stockcode không phải sản phẩm: "
+        f"Loại đơn lớn đã bị hủy toàn bộ (|sales| >= {min_sales:,}): "
+        f"{before} -> {len(df)} (bỏ {before-len(df)}); tìm thấy {len(big_cancels)} dòng hủy lớn."
+    )
+    for inv, code, qty, price, sales, cancel_inv in pairs:
+        print(f"  Hóa đơn {inv} | {code} | qty {qty} x {price} = {sales:,.2f} | bị hủy bởi {cancel_inv}")
+    return df
+
+
+def filter_non_product_stockcodes(df, codes=NON_PRODUCT_STOCKCODES):
+    """
+    Loại các dòng có stockcode thuộc NON_PRODUCT_STOCKCODES (POST, DOT, M, ...).
+    In ra các mã chữ còn lại (không bắt đầu bằng 5 chữ số) để nhóm xem xét thêm.
+    """
+    before = len(df)
+    codes_norm = df["stockcode"].astype(str).str.strip().str.upper()
+    drop_mask = codes_norm.isin({c.upper() for c in codes})
+    df = df.loc[~drop_mask].reset_index(drop=True)
+    print(
+        f"Lọc stockcode không phải sản phẩm ({len(codes)} mã): "
         f"{before} -> {len(df)} (bỏ {before-len(df)})."
     )
+    rest = df.loc[~df["stockcode"].astype(str).str.match(r"^\d{5}"), ["stockcode", "description"]]
+    if len(rest):
+        top = (rest.groupby("stockcode")["description"].agg(["size", "first"])
+                   .sort_values("size", ascending=False).head(15))
+        print(f"  Còn {rest['stockcode'].nunique()} mã chữ khác được giữ lại (kiểm tra xem có phải phí/điều chỉnh):")
+        print(top.to_string())
     return df
 
 
@@ -563,6 +613,11 @@ def run_preprocessing(path=RAW_PATH, out_dir=PROCESSED_DIR):
     # ----- Báo cáo bất thường (trước lọc) -----
     report_anomalies(df)
 
+    # ----- Loại đơn lớn đã bị hủy toàn bộ (cần chạy trước khi lọc quantity > 0) -----
+    if DROP_CANCELLED_LARGE_ORDERS:
+        df = drop_cancelled_large_orders(df)
+        steps.append(("Loại đơn lớn đã bị hủy toàn bộ", len(df)))
+
     # ----- Lọc giao dịch không hợp lệ (quantity > 0 và price > 0) -----
     if FILTER_INVALID_TRANSACTIONS:
         df = filter_invalid_transactions(df)
@@ -677,7 +732,10 @@ def run_preprocessing(path=RAW_PATH, out_dir=PROCESSED_DIR):
             for col, (lower, upper) in bounds.items()
         },
         "filter_invalid_transactions": FILTER_INVALID_TRANSACTIONS,
+        "drop_cancelled_large_orders": DROP_CANCELLED_LARGE_ORDERS,
+        "cancelled_order_min_sales": CANCELLED_ORDER_MIN_SALES,
         "filter_non_product_stockcodes": FILTER_NON_PRODUCT_STOCKCODES,
+        "non_product_stockcodes": sorted(NON_PRODUCT_STOCKCODES),
         "steps": [{"step": s, "rows": int(n)} for s, n in steps],
         "rows": {
             "train": len(train),
