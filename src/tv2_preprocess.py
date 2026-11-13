@@ -1,5 +1,5 @@
 """
-src/preprocess.py - Tiền xử lý dữ liệu cho dự án Predicting Product Sales (TV2).
+src/tv2_preprocess.py - Tiền xử lý dữ liệu cho dự án Predicting Product Sales (TV2).
 
 Quy tắc (đã cập nhật theo kế hoạch nhóm + báo cáo EDA):
 - Không chỉnh sửa dữ liệu gốc trong data/raw/.
