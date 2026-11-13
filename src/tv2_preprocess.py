@@ -13,7 +13,7 @@ Quy tắc (đã cập nhật theo kế hoạch nhóm + báo cáo EDA):
     avg_price = mean(price)
     country   = mode(country)
 - Chia train/validation/test theo MỐC TUẦN (không cắt giữa tuần),
-  mốc mặc định 2011-10-05 / 2011-11-21 khớp báo cáo.
+  mốc mặc định 2011-10-03 / 2011-11-21 (đều là thứ Hai).
 - Imputer, scaler, encoder và ngưỡng IQR chỉ FIT trên train.
 - Validation dùng chọn mô hình/tuning; test chỉ dùng đánh giá cuối.
 - Loại total_qty / avg_price / order_count khỏi feature của TV2 vì chúng
@@ -25,6 +25,13 @@ Cách dùng cho TV4/TV5 (fit lại trong từng fold CV):
     num_cols, cat_cols = get_feature_types(train)
     pre = build_preprocessor(num_cols, cat_cols)   # CHƯA fit
     model = Pipeline([("pre", pre), ("model", ...)])
+
+Lưu ý cho TV3:
+- cleaned_lines.csv có cột week_start và split; khi tính đặc trưng chỉ dùng các
+  dòng của tuần NHỎ HƠN tuần cần dự đoán (không dùng dòng validation/test để
+  tính đặc trưng cho train).
+- Bảng tuần chưa điền 0 cho tuần không bán: shift(1) sẽ lấy lần bán gần nhất,
+  không phải tuần liền trước. Hãy reindex đủ các tuần trước khi tính lag.
 """
 
 from pathlib import Path
@@ -67,7 +74,7 @@ LEAKAGE_COLS = ["quantity", "price", "total_qty", "avg_price", "order_count"]
 
 # Mốc chia theo tuần, khớp mốc ngày đã dùng trong báo cáo.
 # Có thể để None để tự tính theo tỷ lệ trên các tuần duy nhất.
-SPLIT_CUTOFFS = ("2011-10-05", "2011-11-21")
+SPLIT_CUTOFFS = ("2011-10-03", "2011-11-21")
 TEST_RATIO = 0.10
 VALIDATION_RATIO = 0.20
 
@@ -75,7 +82,8 @@ VALIDATION_RATIO = 0.20
 FILTER_INVALID_TRANSACTIONS = True
 
 # Tùy chọn: lọc thêm stockcode không phải sản phẩm (POST, DOT, M, BANK CHARGES...).
-# Mặc định TẮT để khớp con số "530.105 dòng hợp lệ, 3.922 mã sản phẩm" của báo cáo.
+# Mặc định TẮT để giữ khớp 3.922 sản phẩm / 101.579 quan sát của báo cáo TV1.
+# (Số dòng giao dịch sau lọc là 524.879 vì đã xóa trùng; TV1 ghi 530.105 trước khi xóa trùng.)
 # Bật True nếu nhóm muốn dự báo thuần sản phẩm (loại phí ship/điều chỉnh).
 FILTER_NON_PRODUCT_STOCKCODES = False
 PRODUCT_STOCKCODE_REGEX = r"^\d{5}"
@@ -294,6 +302,8 @@ def aggregate_weekly(df, date_col=DATE_COL, week_col=WEEK_COL):
     Gộp dữ liệu mức dòng về mức (stockcode × tuần).
     Chỉ giữ các cặp (stockcode, tuần) CÓ phát sinh giao dịch (không điền 0),
     khớp báo cáo (101.579 quan sát trên 53 tuần cho 3.922 sản phẩm).
+    Lưu ý: vì không điền 0 nên shift(1) theo sản phẩm lấy lần bán gần nhất,
+    không phải tuần liền trước (xem lưu ý cho TV3 ở đầu file).
     """
     df = df.copy()
     # to_period("W") mặc định là W-SUN → start_time là thứ Hai đầu tuần.
@@ -330,10 +340,10 @@ def compute_week_cutoffs(weeks, cutoffs, validation_ratio, test_ratio):
         val_start = val_start.to_period("W").start_time
         test_start = test_start.to_period("W").start_time
     else:
-        weeks_sorted = np.sort(np.asarray(weeks))
+        weeks_sorted = np.sort(pd.to_datetime(np.asarray(weeks)))
         n = len(weeks_sorted)
-        val_start = weeks_sorted[int(n * (1 - validation_ratio - test_ratio))]
-        test_start = weeks_sorted[int(n * (1 - test_ratio))]
+        val_start = pd.Timestamp(weeks_sorted[int(n * (1 - validation_ratio - test_ratio))])
+        test_start = pd.Timestamp(weeks_sorted[int(n * (1 - test_ratio))])
     if not val_start < test_start:
         raise ValueError("Mốc validation phải sớm hơn mốc test.")
     return val_start, test_start
@@ -517,7 +527,8 @@ def transform_features(preprocessor, df, feature_cols):
 def run_preprocessing(path=RAW_PATH, out_dir=PROCESSED_DIR):
     """
     Chạy toàn bộ quy trình và lưu vào out_dir:
-    - cleaned_lines.csv: dữ liệu mức dòng sau khi lọc (để TV3 tham khảo).
+    - cleaned_lines.csv: dữ liệu mức dòng sau khi lọc, có cột week_start và split
+      (train/validation/test) để TV3 không dùng nhầm dữ liệu tương lai.
     - train.csv, validation.csv, test.csv: dữ liệu tuần sau tổng hợp, đã chia.
     - split_index.csv: (stockcode, week_start) -> split.
     - X_*.csv, y_*.csv: ma trận đặc trưng và target cho từng tập.
@@ -569,10 +580,19 @@ def run_preprocessing(path=RAW_PATH, out_dir=PROCESSED_DIR):
 
     # ----- Tổng hợp về mức (stockcode × tuần) -----
     weekly = aggregate_weekly(df)
-    steps.append(("Tổng hợp (stockcode × tuần)", len(weekly)))
+    steps.append(("Tổng hợp (stockcode × tuần) - gom nhóm, không loại dòng", len(weekly)))
 
     # ----- Chia theo mốc tuần -----
     train, validation, test, split_meta = split_weekly(weekly)
+
+    # Gắn tuần + tập cho từng dòng giao dịch (cùng mốc với bảng tuần).
+    cleaned_lines[WEEK_COL] = cleaned_lines[DATE_COL].dt.to_period("W").dt.start_time
+    vs = pd.Timestamp(split_meta["validation_start_week"])
+    ts = pd.Timestamp(split_meta["test_start_week"])
+    cleaned_lines["split"] = np.select(
+        [cleaned_lines[WEEK_COL] < vs, cleaned_lines[WEEK_COL] < ts],
+        ["train", "validation"], default="test",
+    )
 
     # ----- Outlier (fit trên train) -----
     outlier_cols = [
@@ -629,6 +649,8 @@ def run_preprocessing(path=RAW_PATH, out_dir=PROCESSED_DIR):
     steps_df["so_dong_bi_bo"] = (
         steps_df["so_dong_sau_buoc"].shift(1) - steps_df["so_dong_sau_buoc"]
     ).fillna(0).astype(int)
+    # Gom nhóm không phải loại dòng nên không tính vào "số dòng bị bỏ".
+    steps_df.loc[steps_df["buoc"].str.startswith("Tổng hợp"), "so_dong_bi_bo"] = 0
     steps_df.to_csv(out_dir / "preprocessing_steps.csv", index=False)
     print("\n===== SỐ DÒNG THEO TỪNG BƯỚC =====")
     print(steps_df.to_string(index=False))
