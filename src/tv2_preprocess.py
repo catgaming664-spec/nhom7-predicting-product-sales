@@ -72,7 +72,8 @@ ROW_ID_COL = "row_id"          # vị trí dòng trong file gốc (mức dòng g
 #   → dùng trực tiếp là rò rỉ target khi dự báo cùng tuần. TV3 sẽ tạo lag/rolling.
 LEAKAGE_COLS = ["quantity", "price", "total_qty", "avg_price", "order_count"]
 
-# Mốc chia theo tuần, khớp mốc ngày đã dùng trong báo cáo.
+# Mốc chia theo tuần: ngày bên dưới được đưa về đầu tuần (thứ Hai) nên không tuần nào bị cắt đôi.
+# Validation bắt đầu từ tuần 2011-10-03, test từ tuần 2011-11-21.
 # Có thể để None để tự tính theo tỷ lệ trên các tuần duy nhất.
 SPLIT_CUTOFFS = ("2011-10-03", "2011-11-21")
 TEST_RATIO = 0.10
